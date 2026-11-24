@@ -1,0 +1,30 @@
+name: SMA200 - Preflight OKX
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Recuperation du depot
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Extraction du moteur
+        run: |
+          python3 -m zipfile -e SMA200_V042_GITHUB_PREFLIGHT.zip moteur
+
+      - name: Tests unitaires
+        working-directory: moteur
+        run: python3 -m unittest discover -s tests
+
+      - name: Verification OKX
+        working-directory: moteur
+        run: python3 -u preflight_okx.py
