@@ -2,7 +2,8 @@ name: SMA200 - Repetition generale
 
 on:
   schedule:
-    - cron: '25 0 * * *'
+    - cron: '25,55 0 * * *'
+    - cron: '25,45 1 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -83,7 +84,7 @@ jobs:
               result = cycle(db, anchor)
               new = p.checkpoint(db, old)
               anchor.write_text(encode(new))
-              if result['type'] == 'ERROR_REVIEW' or new['incident_count'] > old['incident_count']:
+              if result['type'] in ('ERROR_REVIEW', 'DECISION_MANQUEE') or new['incident_count'] > old['incident_count']:
                   status.write_text('HALTED\n')
               print('Resultat :', result['type'])
           else:
