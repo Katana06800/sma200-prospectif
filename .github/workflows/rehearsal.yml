@@ -1,0 +1,111 @@
+name: SMA200 - Repetition generale
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Mode
+        required: true
+        type: choice
+        options:
+          - init
+          - step
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sma200-rehearsal
+  cancel-in-progress: false
+
+jobs:
+  rehearsal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: Extraction du moteur
+        run: |
+          python3 -m zipfile -e SMA200_V042_GITHUB_PREFLIGHT.zip "$RUNNER_TEMP/moteur"
+
+      - name: Repetition generale
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$RUNNER_TEMP/moteur"
+          branch="rehearsal-state"
+
+          if [ "$MODE" = "init" ]; then
+            status=0
+            git ls-remote --exit-code --heads origin "refs/heads/$branch" || status=$?
+            [ "$status" -eq 2 ]
+            git switch --orphan "$branch"
+          else
+            git fetch origin "refs/heads/$branch"
+            git checkout --detach FETCH_HEAD
+            sha256sum -c SHA256SUMS
+          fi
+
+          python3 -u - <<'PY'
+          from pathlib import Path
+          from datetime import timedelta
+          import hashlib, os, time
+          import prospective as p
+          from operations import cycle, require_anchor
+          from state import encode, load
+
+          mode = os.environ['MODE']
+          db = Path('rehearsal.db')
+          anchor = Path('checkpoint.json')
+          protocol = Path('rehearsal.txt')
+          status = Path('status.txt')
+
+          if mode == 'init':
+              protocol.write_text('REPETITION TECHNIQUE - NON OFFICIELLE\n')
+              c = p.sync_clock()
+              day = (p.EPOCH + timedelta(milliseconds=c.bounds(time.monotonic_ns())[1])).date() + timedelta(days=1)
+              p.init(db, day.isoformat(), protocol)
+              anchor.write_text(encode(p.checkpoint(db)))
+              status.write_text('READY\n')
+              print('T0 UTC :', day)
+
+          elif mode == 'step':
+              if status.read_text().strip() != 'READY':
+                  raise RuntimeError('Revue requise')
+              old = require_anchor(db, anchor)
+              _, s = load(db)
+              assert hashlib.sha256(protocol.read_bytes()).hexdigest() == s['prospective']['protocol_sha256']
+              result = cycle(db, anchor)
+              new = p.checkpoint(db, old)
+              anchor.write_text(encode(new))
+              if result['type'] == 'ERROR_REVIEW' or new['incident_count'] > old['incident_count']:
+                  status.write_text('HALTED\n')
+              print('Resultat :', result['type'])
+          else:
+              raise ValueError('Mode inconnu')
+
+          current = require_anchor(db, anchor)
+          r, s = load(db)
+          print('Revision :', r)
+          print('Capital liquide :', s['cash'])
+          print('Positions :', s['positions'])
+          print('Checkpoint :', current['sha256'])
+          print('Etat :', status.read_text().strip())
+          PY
+
+          sha256sum rehearsal.db checkpoint.json rehearsal.txt status.txt > SHA256SUMS
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add rehearsal.db checkpoint.json rehearsal.txt status.txt SHA256SUMS
+
+          if ! git diff --cached --quiet; then
+            git commit -m "Rehearsal state update"
+            git push origin "HEAD:refs/heads/$branch"
+          fi
+
+          [ "$(cat status.txt)" = "READY" ]
