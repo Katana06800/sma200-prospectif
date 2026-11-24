@@ -1,0 +1,99 @@
+name: SMA200 - Test persistance
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Mode du test
+        required: true
+        type: choice
+        options:
+          - create
+          - verify
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sma200-persistence-test
+  cancel-in-progress: false
+
+jobs:
+  persistence:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: Extraction du moteur
+        run: |
+          python3 -m zipfile -e SMA200_V042_GITHUB_PREFLIGHT.zip "$RUNNER_TEMP/moteur"
+
+      - name: Test de persistance
+        env:
+          MODE: ${{ inputs.mode }}
+        run: |
+          export PYTHONPATH="$RUNNER_TEMP/moteur:$RUNNER_TEMP/moteur/tests"
+
+          if [ "$MODE" = "create" ]; then
+            status=0
+            git ls-remote --exit-code --heads origin refs/heads/persistence-test || status=$?
+            [ "$status" -eq 2 ]
+            git switch --orphan persistence-test
+
+            python3 - <<'PY'
+          import prospective as p
+          from clock import Clock
+          from pathlib import Path
+          from state import encode
+          from journal import record
+          from schedule import limits
+          from test_guard import DATE, START, rows
+
+          Path("test-protocol.txt").write_text("TEST ONLY")
+          p.init("test.db", DATE, "test-protocol.txt",
+                 clock_provider=lambda: Clock(START-1000000,0,100000000),
+                 now=lambda: 200000000)
+
+          p.mark_expired("test.db", DATE,
+                 clock_provider=lambda: Clock(limits(DATE)[1]+1000,0,100000000),
+                 now=lambda: 200000000,
+                 fetch=lambda pair,day: rows()[pair])
+
+          record("test.db", DATE, "RESTART", {"test":True})
+          Path("checkpoint.json").write_text(encode(p.checkpoint("test.db")))
+          PY
+
+            echo "$GITHUB_RUN_ID" > run-id.txt
+            sha256sum test.db checkpoint.json test-protocol.txt run-id.txt > SHA256SUMS
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add test.db checkpoint.json test-protocol.txt run-id.txt SHA256SUMS
+            git commit -m "Create persistence test"
+            git push origin HEAD:refs/heads/persistence-test
+            echo "SAUVEGARDE OK"
+
+          elif [ "$MODE" = "verify" ]; then
+            git fetch origin refs/heads/persistence-test
+            git checkout --detach FETCH_HEAD
+            sha256sum -c SHA256SUMS
+            [ "$(cat run-id.txt)" != "$GITHUB_RUN_ID" ]
+
+            python3 - <<'PY'
+          from operations import require_anchor
+          from state import load
+          from execution import PAIRS
+
+          c = require_anchor("test.db","checkpoint.json")
+          r,s = load("test.db")
+          assert r == 1 and c["revision"] == 1
+          assert c["incident_count"] == 1
+          assert s["cash"] == "1000"
+          assert s["positions"] == {p:"0" for p in PAIRS}
+          print("Capital : 1000 USDC fictifs")
+          print("PERSISTANCE OK")
+          PY
+          else
+            exit 1
+          fi
