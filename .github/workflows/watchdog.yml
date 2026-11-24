@@ -1,0 +1,108 @@
+name: SMA200 - Watchdog
+
+on:
+  schedule:
+    - cron: '20 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          persist-credentials: false
+
+      - name: Extraction du moteur
+        run: |
+          python3 -m zipfile -e SMA200_V042_GITHUB_PREFLIGHT.zip "$RUNNER_TEMP/moteur"
+
+      - name: Recuperation du portefeuille
+        run: |
+          git fetch origin refs/heads/rehearsal-state
+          git checkout --detach FETCH_HEAD
+          sha256sum -c SHA256SUMS
+
+      - name: Surveillance
+        run: |
+          export PYTHONPATH="$RUNNER_TEMP/moteur"
+
+          python3 -u - <<'PY'
+          from datetime import datetime, timezone, timedelta
+          from pathlib import Path
+          import hashlib
+          import json
+          import sqlite3
+          from operations import require_anchor
+          from state import load
+
+          def require(condition, message):
+              if not condition:
+                  raise RuntimeError(message)
+
+          db = Path("rehearsal.db")
+          checkpoint = require_anchor(db, "checkpoint.json")
+          revision, state = load(db)
+
+          status = Path("status.txt").read_text().strip()
+          require(status == "READY", "ALERTE : moteur arrete")
+
+          protocol = Path("rehearsal.txt").read_bytes()
+          require(
+              hashlib.sha256(protocol).hexdigest()
+              == state["prospective"]["protocol_sha256"],
+              "ALERTE : protocole modifie"
+          )
+
+          require(
+              checkpoint["incident_count"] == 0,
+              "ALERTE : incident detecte"
+          )
+
+          now = datetime.now(timezone.utc)
+          expected = now.date()
+
+          if now.hour < 2:
+              expected -= timedelta(days=1)
+
+          expected = expected.isoformat()
+          start = state["prospective"]["start_day"]
+
+          print("Date UTC :", now.isoformat())
+          print("Revision :", revision)
+          print("Etat :", status)
+          print("Derniere decision :", state["last_day"])
+
+          if expected < start:
+              print("Initialisation valide - premier cycle a venir")
+          else:
+              require(
+                  state["last_day"] is not None
+                  and state["last_day"] >= expected,
+                  "ALERTE : decision quotidienne absente"
+              )
+
+              with sqlite3.connect(
+                  db.resolve().as_uri() + "?mode=ro",
+                  uri=True
+              ) as conn:
+                  row = conn.execute(
+                      "SELECT event FROM journal WHERE day=?",
+                      (expected,)
+                  ).fetchone()
+
+              require(row is not None, "ALERTE : journal incomplet")
+              event = json.loads(row[0])
+
+              require(
+                  event["type"] == "PAPER_TEST",
+                  "ALERTE : decision manquee ou invalide"
+              )
+
+          print("WATCHDOG : OK")
+          PY
