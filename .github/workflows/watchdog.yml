@@ -29,6 +29,7 @@ jobs:
           sha256sum -c SHA256SUMS
 
       - name: Surveillance
+        id: surveillance
         run: |
           export PYTHONPATH="$RUNNER_TEMP/moteur"
 
@@ -38,6 +39,7 @@ jobs:
           import hashlib
           import json
           import sqlite3
+          import os
           from operations import require_anchor
           from state import load
 
@@ -104,5 +106,42 @@ jobs:
                   "ALERTE : decision manquee ou invalide"
               )
 
+          allow_ping = (
+              now.date().isoformat() < start
+              or (
+                  now.hour * 60 + now.minute >= 140
+                  and expected >= start
+              )
+          )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write("ping=" + ("yes" if allow_ping else "no") + "\n")
+
           print("WATCHDOG : OK")
           PY
+
+      - name: Signal Healthchecks
+        if: ${{ success() && steps.surveillance.outputs.ping == 'yes' }}
+        env:
+          PING_URL: ${{ secrets.HEALTHCHECKS_PING_URL }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$PING_URL" ]; then
+            echo "ERREUR : secret Healthchecks absent"
+            exit 1
+          fi
+
+          if [[ ! "$PING_URL" =~ ^https://hc-ping\.com/[a-fA-F0-9-]{36}$ ]]; then
+            echo "ERREUR : adresse Healthchecks invalide"
+            exit 1
+          fi
+
+          curl --fail --silent \
+            --max-time 10 \
+            --retry 3 \
+            --retry-max-time 60 \
+            --output /dev/null \
+            "$PING_URL"
+
+          echo "HEALTHCHECKS : SIGNAL ENVOYE"
