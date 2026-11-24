@@ -1,0 +1,107 @@
+name: SMA200 - Test securite
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sma200-safety-test
+  cancel-in-progress: false
+
+jobs:
+  safety:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+
+      - name: Extraction du moteur
+        run: |
+          python3 -m zipfile -e SMA200_V042_GITHUB_PREFLIGHT.zip "$RUNNER_TEMP/moteur"
+
+      - name: Test de securite
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$RUNNER_TEMP/moteur"
+          branch="safety-test-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin refs/heads/persistence-test
+          seed=$(git rev-parse FETCH_HEAD)
+          git push origin "$seed:refs/heads/$branch"
+
+          for actor in A B; do
+            git worktree add --detach "$RUNNER_TEMP/$actor" "$seed"
+            (
+              cd "$RUNNER_TEMP/$actor"
+              sha256sum -c SHA256SUMS
+
+              python3 - "$actor" <<'PY'
+          import sys
+          from pathlib import Path
+          from journal import record
+          from operations import require_anchor
+          from prospective import checkpoint
+          from state import load, encode
+
+          old = require_anchor('test.db','checkpoint.json')
+          _, state = load('test.db')
+          record('test.db', state['last_day'], 'RESTART', {'actor':sys.argv[1]})
+          new = checkpoint('test.db',old)
+          assert new['incident_count'] == old['incident_count'] + 1
+          Path('checkpoint.json').write_text(encode(new))
+          require_anchor('test.db','checkpoint.json')
+          PY
+
+              sha256sum test.db checkpoint.json test-protocol.txt run-id.txt > SHA256SUMS
+              git add test.db checkpoint.json SHA256SUMS
+              git commit -m "Safety test $actor"
+            )
+          done
+
+          remote_head() {
+            git ls-remote --exit-code origin "refs/heads/$branch" | cut -f1
+          }
+
+          [ "$(remote_head)" = "$seed" ]
+          echo "INTERRUPTION AVANT PUBLICATION : OK"
+
+          git -C "$RUNNER_TEMP/A" push origin "HEAD:refs/heads/$branch"
+          a=$(git -C "$RUNNER_TEMP/A" rev-parse HEAD)
+
+          if git -C "$RUNNER_TEMP/B" push origin "HEAD:refs/heads/$branch" > "$RUNNER_TEMP/rejection.log" 2>&1; then
+            echo "ERREUR : mise a jour obsolete acceptee"
+            exit 1
+          fi
+
+          cat "$RUNNER_TEMP/rejection.log"
+          grep -Eq 'non-fast-forward|fetch first' "$RUNNER_TEMP/rejection.log"
+          [ "$(remote_head)" = "$a" ]
+          echo "ECRITURE OBSOLETE REFUSEE : OK"
+
+          git fetch origin "refs/heads/$branch"
+          [ "$(git rev-parse FETCH_HEAD)" = "$a" ]
+          git worktree add --detach "$RUNNER_TEMP/C" "$a"
+          cd "$RUNNER_TEMP/C"
+          sha256sum -c SHA256SUMS
+
+          python3 - <<'PY'
+          import json
+          from operations import require_anchor
+          from state import load
+          from journal import history
+
+          c = require_anchor('test.db','checkpoint.json')
+          r,s = load('test.db')
+          assert r == 1 and c['incident_count'] == 2
+          assert s['cash'] == '1000'
+          assert json.loads(history('test.db')[-1][4]) == {'actor':'A'}
+          print('CAPITAL ET JOURNAL CONSERVES : OK')
+          print('SAFETY TEST : OK')
+          PY
